@@ -53,11 +53,15 @@ let configureApp (app : IApplicationBuilder) =
         .UseGiraffe(webApp)
 
 let configureServices (services : IServiceCollection) =
-    services.AddCors()    |> ignore
-    services.AddGiraffe() |> ignore
+    services
+        .AddCors()
+        .AddGiraffe()
+        .AddAuthentication("Signature")
+            .AddScheme()
+    |> ignore
 
 let configureLogging (builder : ILoggingBuilder) =
-    builder.AddFilter(fun l -> l.Equals LogLevel.Error)
+    builder.AddFilter(fun l -> l.Equals LogLevel.Trace)
            .AddConsole()
            .AddDebug() |> ignore
 
