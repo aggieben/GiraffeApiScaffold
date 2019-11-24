@@ -90,13 +90,13 @@ module SignatureHelpers =
         | 0 -> Ok state
         | _ -> Error InvalidSignature
 
-    let validateSignature (repository:IRepository) (cache:IDistributedCache) (clock:ISystemClock) authorization =
+    let validateSignature (repository:IRepository) (cache:IDistributedCache) authorization =
         parseAuthorizationHeader authorization
         <->>-   ensureNonceAsync cache
         >=>     ensureClientSecretAsync repository
         <*>     computeCheckSignature
         <*->    compareSignatures
-        <*>     ignore // drop state
+        <*>     (fun state -> state.clientId.Value) // drop state
 
 type SignatureAuthenticationOptions() =
     inherit AuthenticationSchemeOptions()
@@ -109,11 +109,15 @@ type SignatureAuthenticationHandler(options, loggerFactory, encoder, clock, cach
             task {
                 match SignatureHelpers.getSignature request.Headers with
                 | None -> return AuthenticateResult.NoResult()
-                | Some _ -> 
-                    // TODO: validate the signature here
-                    let! principal = this.GetClaimsPrincipalForClient(String.Empty)
-                    let ticket = AuthenticationTicket(principal, this.Scheme.Name)
-                    return AuthenticateResult.Success(ticket)
+                | Some authorization -> 
+                    let! validationResult = 
+                        SignatureHelpers.validateSignature repository cache authorization
+                    match validationResult with
+                    | Error err -> return AuthenticateResult.Fail (sprintf "%A" err)
+                    | Ok clientId ->
+                        let! principal = this.GetClaimsPrincipalForClient(clientId)
+                        let ticket = AuthenticationTicket(principal, this.Scheme.Name)
+                        return AuthenticateResult.Success(ticket)
             }
 
     member this.GetClaimsPrincipalForClient(clientId:string) =
