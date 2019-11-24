@@ -92,10 +92,11 @@ module SignatureHelpers =
 
     let validateSignature (repository:IRepository) (cache:IDistributedCache) (clock:ISystemClock) authorization =
         parseAuthorizationHeader authorization
-        <->>- ensureNonceAsync cache
-        // <+>>- ensureClientSecretAsync repository
-        // <*> computeCheckSignature
-        // <*-> compareSignatures
+        <->>-   ensureNonceAsync cache
+        >=>     ensureClientSecretAsync repository
+        <*>     computeCheckSignature
+        <*->    compareSignatures
+        <*>     ignore // drop state
 
 type SignatureAuthenticationOptions() =
     inherit AuthenticationSchemeOptions()

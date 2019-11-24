@@ -41,6 +41,12 @@ module TaskResult =
     }
 
     let bind (f:'a->Task<Result<'b,'e>>) (a:'a) = f a
+    let compose (f:'a->Task<Result<'b,'e>>) (tr:Task<Result<'a,'e>>) = task {
+        match! tr with
+        | Ok a -> return! f a
+        | Error e -> return Error e
+    }
+
 
     let inline (<*>) tr f = map f tr
     let inline (<*!>) tr f = mapErr f tr
@@ -54,6 +60,7 @@ module TaskResult =
     let inline (<->>-) r f = mapResultBindTaskResult f r
 
     let inline (>>=) a f = bind f a
+    let inline (>=>) tr f = compose f tr
 
 // module Result =
 //     let inline (<*>) r f = Result.map f r
