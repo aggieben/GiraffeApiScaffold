@@ -57,7 +57,9 @@ let configureServices (services : IServiceCollection) =
         .AddCors()
         .AddGiraffe()
         .AddAuthentication("Signature")
-            .AddScheme()
+            .AddScheme<SignatureAuthenticationOptions, SignatureAuthenticationHandler>("Signature",
+                (fun opts -> 
+                    opts.Realm <- "GiraffeApiScaffold"))
     |> ignore
 
 let configureLogging (builder : ILoggingBuilder) =
