@@ -19,7 +19,10 @@ let webApp =
         subRoute "/api"
             (choose [
                 GET >=> choose [
-                    route "/hello" >=> handleGetHello
+                    route "/auth/nonce" >=> handleGetNonce
+                    route "/hello" >=> 
+                        requiresAuthentication unauthorizedHandler >=>
+                            handleGetHello
                 ]
             ])
         setStatusCode 404 >=> text "Not Found" ]
@@ -36,12 +39,6 @@ let errorHandler (ex : Exception) (logger : ILogger) =
 // Config and Main
 // ---------------------------------
 
-let configureCors (builder : CorsPolicyBuilder) =
-    builder.WithOrigins("http://localhost:8080")
-           .AllowAnyMethod()
-           .AllowAnyHeader()
-           |> ignore
-
 let configureApp (app : IApplicationBuilder) =
     let env = app.ApplicationServices.GetService<IWebHostEnvironment>()
  
@@ -49,23 +46,25 @@ let configureApp (app : IApplicationBuilder) =
     | true  -> app.UseDeveloperExceptionPage()
     | false -> app.UseGiraffeErrorHandler errorHandler)
         .UseHttpsRedirection()
-        .UseCors(configureCors)
         .UseGiraffe(webApp)
 
 let configureServices (services : IServiceCollection) =
     services
-        .AddCors()
         .AddGiraffe()
-        .AddAuthentication("Signature")
-            .AddScheme<SignatureAuthenticationOptions, SignatureAuthenticationHandler>("Signature",
-                (fun opts -> 
-                    opts.Realm <- "GiraffeApiScaffold"))
+        .AddDistributedMemoryCache()
+        .AddScoped<IRepository,Repository>()
+    |> ignore
+
+    services.AddAuthentication("Signature")
+        .AddScheme<SignatureAuthenticationOptions, SignatureAuthenticationHandler>("Signature",
+            (fun opts -> 
+                opts.Realm <- "GiraffeApiScaffold"))
     |> ignore
 
 let configureLogging (builder : ILoggingBuilder) =
     builder.AddFilter(fun l -> l.Equals LogLevel.Trace)
-           .AddConsole()
-           .AddDebug() |> ignore
+       .AddConsole()
+       .AddDebug() |> ignore
 
 [<EntryPoint>]
 let main _ =
