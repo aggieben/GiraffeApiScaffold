@@ -7,6 +7,13 @@
 .ionide
 .vscode
 
+# Paket dependency manager
+.paket/paket.exe
+paket-files/
+
+# FAKE - F# Make
+.fake/
+
 # User-specific files
 *.suo
 *.user
@@ -283,13 +290,6 @@ node_modules/
 **/*.Server/GeneratedArtifacts
 **/*.Server/ModelManifest.xml
 _Pvt_Extensions
-
-# Paket dependency manager
-.paket/paket.exe
-paket-files/
-
-# FAKE - F# Make
-.fake/
 
 # JetBrains Rider
 .idea/
