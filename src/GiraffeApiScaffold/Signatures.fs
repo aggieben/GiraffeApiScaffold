@@ -17,6 +17,7 @@ open Giraffe.ComputationExpressions
 
 open Result
 open TaskResult
+open Microsoft.AspNetCore.Http.Headers
 
 type SignatureAlgorithm =
     | HmacSha256
@@ -42,6 +43,11 @@ type SignatureValidationError =
     | InvalidCreatedTimestamp of string
     | InvalidExpiresTimestamp of string
     | InvalidHeaders
+    | NonceExpired
+    | InvalidClient
+    | InvalidSignature
+    | InvalidSignatureString of string
+    | HashError of string
 
 (*
     example:
@@ -91,34 +97,6 @@ type SignatureEnvelope =
       expires: DateTimeOffset option
       headers: string[] option }
 
-
-                // (fun map ->
-                //     let missingRequired = 
-                //         [ "keyId"; "signature" ]
-                //         |> List.filter (map.ContainsKey >> not)
-
-                //     if missingRequired.Length <> 0 then 
-                //         RequiredParametersMissing missingRequired |> Error
-                //     else
-                //         let keyId = map.["keyId"]
-                //         let signature = map.["signature"] |> Convert.FromBase64String
-                //         let algorithm = SignatureAlgorithm.TryParse map.["algorithm"]
-                //         let created = parseDateTimeOffset map "created"
-                //         let expires = parseDateTimeOffset map "expires"
-                //         let headers = 
-                //             if map.ContainsKey "headers" 
-                //             then map.["headers"].Split(' ', StringSplitOptions.RemoveEmptyEntries)
-                //                  |> Some
-                //             else None
-
-                //         { keyId = keyId 
-                //           signature = signature
-                //           algorithm = algorithm
-                //           created = created
-                //           expires = expires
-                //           headers = headers }
-                //         |> Ok )
-
 module private SignatureHelpers =
 
     type private SignatureEnvelopeValidationState =
@@ -127,31 +105,16 @@ module private SignatureHelpers =
 
     type private SignatureValidationState =
         { envelope: SignatureEnvelope option
-          signature: ReadOnlyMemory<byte> option
+          request: HttpRequest option
           clientSecret : byte[] option 
           checkSignature : byte[] option }
         with 
             static member Default =
                 { envelope = None
-                  signature = None
+                  request = None
                   clientSecret = None
                   checkSignature = None }
 
-    type SignatureValidationError =
-        | NonceExpired
-        | InvalidClient
-        | InvalidSignature
-
-    // let ensureArrayLength array length =
-    //     if Array.length array = length then Ok array else Error InvalidSignature
-
-    // let decodeSignature (encSig:string) =
-    //     let bytes : byte[] = Array.zeroCreate encSig.Length
-    //     let byteCountRef = ref 0
-    //     if Convert.TryFromBase64String(encSig, bytes.AsSpan(), byteCountRef) then
-    //         ReadOnlyMemory(bytes).Slice(0, !byteCountRef) |> Ok
-    //     else
-    //         Error InvalidSignature
     let getSignatureHeaderValue = 
         (fun (h:IHeaderDictionary) -> h.GetCommaSeparatedValues(HeaderNames.Authorization))
         >> Seq.tryFind (fun auth -> auth.StartsWith("Signature"))
@@ -162,7 +125,7 @@ module private SignatureHelpers =
         | None -> Error MissingHeaderValue
         | Some headerValue -> UnvalidatedSignatureEnvelope.TryParse headerValue
 
-    let validateRequiredParams (unvalidatedEnvelope:UnvalidatedSignatureEnvelope) =
+    let private validateRequiredParams (unvalidatedEnvelope:UnvalidatedSignatureEnvelope) =
         let missingRequiredFields = 
             match unvalidatedEnvelope.keyId with 
             | None -> ["keyId"]
@@ -184,7 +147,7 @@ module private SignatureHelpers =
                   expires = None
                   headers = None }} |> Ok
 
-    let validateAlgorithm (options:SignatureAuthenticationOptions) (state:SignatureEnvelopeValidationState) =
+    let private validateAlgorithm (options:SignatureAuthenticationOptions) (state:SignatureEnvelopeValidationState) =
         match state.unvalidatedEnvelope.algorithm with
         | None -> Ok state
         | Some algorithmName -> 
@@ -195,7 +158,7 @@ module private SignatureHelpers =
                 then Ok {state with validatedEnvelope = { state.validatedEnvelope with algorithm = Some algo }}
                 else InvalidAlgorithm |> Error
 
-    let validateCreated (options:SignatureAuthenticationOptions) (state:SignatureEnvelopeValidationState) =
+    let private validateCreated (options:SignatureAuthenticationOptions) (state:SignatureEnvelopeValidationState) =
         // §2.1.4: must be unix timestamp.  future timestamp must fail.  second precision.
         match state.unvalidatedEnvelope.created with
         | None -> Ok state
@@ -212,7 +175,7 @@ module private SignatureHelpers =
                 with
                 | e -> InvalidCreatedTimestamp e.Message |> Error
 
-    let validateExpires (options:SignatureAuthenticationOptions) (state:SignatureEnvelopeValidationState) =
+    let private validateExpires (options:SignatureAuthenticationOptions) (state:SignatureEnvelopeValidationState) =
         // §2.1.5: must be unix integer, subsecond allowed. past timestamp fails
         match state.unvalidatedEnvelope.expires with
         | None -> Ok state
@@ -228,14 +191,14 @@ module private SignatureHelpers =
                 with
                 | e -> InvalidExpiresTimestamp e.Message |> Error
 
-    let validateHeaders (options:SignatureAuthenticationOptions) (state:SignatureEnvelopeValidationState) =
+    let private validateHeaders (options:SignatureAuthenticationOptions) (state:SignatureEnvelopeValidationState) =
         // §2.1.6: if not specified, then default is "(created)".  empty is different that non-specified
         match state.unvalidatedEnvelope.headers with
         | None -> Ok state
         | Some hString ->
             if String.IsNullOrWhiteSpace(hString)
             then InvalidHeaders |> Error
-            else { state with 
+            else { state with
                     validatedEnvelope = 
                         { state.validatedEnvelope with 
                             headers = hString.Split(' ', StringSplitOptions.RemoveEmptyEntries)
@@ -248,8 +211,9 @@ module private SignatureHelpers =
         >>*= validateCreated options
         >>*= validateExpires options
         >>*= validateHeaders options
+        |> Result.map (fun state -> state.validatedEnvelope)
 
-    let ensureClientSecretAsync (repository:IRepository) state = task {
+    let private ensureClientSecretAsync (repository:IRepository) state = task {
         let envelope = state.envelope.Value
         match! repository.GetClientSecret(envelope.keyId) with
         | None -> return InvalidClient |> Error
@@ -258,56 +222,93 @@ module private SignatureHelpers =
             return { state with clientSecret = Some key } |> Ok
     }
 
-    // let computeCheckSignature state = 
-    //     use hmac = new HMACSHA256(state.clientSecret.Value)
-    //     { state with 
-    //         checkSignature = hmac.ComputeHash(state.nonce.Value) 
-    //                          |> Some}
+    let resolveRequestTarget (req:HttpRequest) =
+        req.Path.Add(req.QueryString)
+        |> sprintf "%s %s" (req.Method.ToLowerInvariant())
 
-    // let compareSignatures state =
-    //     let sigSpan = state.signature.Value.Span
-    //     let checkSigSpan = ReadOnlySpan(state.checkSignature.Value)
-    //     match checkSigSpan.SequenceCompareTo(sigSpan) with
-    //     | 0 -> Ok state
-    //     | _ -> Error InvalidSignature
+    
+    let resolveHeaderValue (name:string) (headers:IHeaderDictionary) =
+        match headers.Keys |> Seq.tryFind (fun k -> k.ToLowerInvariant() = name) with
+        | None -> None
+        | Some key -> 
+            headers.[key]
+            |> Seq.map (fun s -> s.Trim())
+            |> (fun strings -> String.Join(", ", strings).Trim())
+            |> Some
 
-    let validateSignature (repository:IRepository) (options:SignatureAuthenticationOptions) (sigenv:SignatureEnvelope) =
-        ensureClientSecretAsync repository { SignatureValidationState.Default 
-                                                with envelope = Some sigenv }
-        
-        // <*>     computeCheckSignature
-        // <*->    compareSignatures
-        // <*>     (fun state -> state.clientId.Value) // drop state
+    let private resolveSignatureDataField (field:string) (validationState:SignatureValidationState) (stringState:string) =
+        try
+            match field with
+            | "(request-target)" -> 
+                stringState 
+                + (resolveRequestTarget validationState.request.Value) 
+                + " "
+                |> Ok
+            | "(created)" ->
+                // I'm intentionally ignoring §2.3.2 here because it's 
+                // (a) unclear and (b) of dubious benefit, afaict
+                stringState
+                + validationState.envelope.Value.created.Value.ToUnixTimeSeconds().ToString()
+                + " "
+                |> Ok
+                // Ditto, I'm ignoring §2.3.3 for the same reasons
+            | "(expires)" ->
+                stringState
+                + validationState.envelope.Value.expires.Value.ToUnixTimeSeconds().ToString()
+                + " "
+                |> Ok
+            | field -> 
+                // §2.3.4: concatenate "name: value"
+                let req = validationState.request.Value
+                match resolveHeaderValue field req.Headers with
+                | None -> sprintf "header not found for field: %s" field |> Error
+                | Some value -> 
+                    stringState 
+                    + field + ": " + value 
+                    + " " 
+                    |> Ok
+        with
+        | e -> sprintf "invalid signature field: %s" e.Message |> Error
+
+    let private constructSignatureData (validationState:SignatureValidationState) =
+        Option.defaultValue [| "(created)" |] validationState.envelope.Value.headers
+        |> Array.fold
+            (fun state field ->
+                Result.bindOk (resolveSignatureDataField field validationState) state)
+            (Ok String.Empty)
+        |> Result.map (fun ss -> ss.Trim())
+        |> Result.map Encoding.UTF8.GetBytes
+
+    let private computeCheckSignature state = 
+        match constructSignatureData state with
+        | Error msg -> InvalidSignatureString msg |> Error
+        | Ok sigdata -> 
+            try
+                use hmac = new HMACSHA256(state.clientSecret.Value)
+                { state with
+                    checkSignature = hmac.ComputeHash(sigdata) |> Some }
+                |> Ok
+            with
+            | e -> HashError e.Message |> Error
+
+    let private compareSignatures state =
+        let sigSpan = ReadOnlySpan(state.envelope.Value.signature)
+        let checkSigSpan = ReadOnlySpan(state.checkSignature.Value)
+        match checkSigSpan.SequenceCompareTo(sigSpan) with
+        | 0 -> Ok state
+        | _ -> Error InvalidSignature
+
+    let validateSignature (repository:IRepository) (options:SignatureAuthenticationOptions) (req:HttpRequest) (sigenv:SignatureEnvelope) =
+        { SignatureValidationState.Default 
+            with 
+                request = Some req
+                envelope = Some sigenv }
+        |> ensureClientSecretAsync repository
+        <*-> computeCheckSignature
+        <*-> compareSignatures
+        <*>  (fun state -> state.envelope.Value.keyId) // drop state
 
 // https://datatracker.ietf.org/doc/draft-cavage-http-signatures/?include_text=1
-(*
-    Signature params:
-        ** required **
-        - keyId [*] : opaque string for lookup
-        - signature [*] : base64-encoded, derived from a signing string 
-            comprised of `algorithm` and `headers` and then signed using the key
-            associated with `keyId`
-        ** recommended **
-        - algorithm : must match algorithm associated with keyId.  hmac-sha256 for our purposes.
-        - created: unix timestamp denoting when the signature was created.  if 
-            timestamp in the future the signature must not be processed.
-            sub-seconds not allowed
-        ** optional **
-        - expires: when the signature ceases to be valid; a unix timestamp. if 
-            timestamp is in the past, the signature must not be processed.  
-            sub-seconds allowed (but I'm not going to support it)
-        - headers: lowercased, quoted list of HTTP header fields used for the signature
-            if not specified, the default is "created"
-            list order is important, and must be specified in the order the field-value
-            pairs are concatenated together in the signing string
-            a zero-length string is not allowed here, because it would specify an
-            empty signing string.
-
-        if any params are duplicated, the signature must not be processed
-
-        signing string is constructed:
-
-*)
 
 type SignatureAuthenticationHandler(options, loggerFactory, encoder, clock, cache:IDistributedCache, repository:IRepository) = 
     inherit AuthenticationHandler<SignatureAuthenticationOptions>(options, loggerFactory, encoder, clock)
@@ -317,19 +318,20 @@ type SignatureAuthenticationHandler(options, loggerFactory, encoder, clock, cach
             // binding is accessible.  This binding is then captured as part of the closure for the CE
             let request = this.Request
             let logger = loggerFactory.CreateLogger<SignatureAuthenticationHandler>()
+            let currentOptions = options.CurrentValue
             task {
                 match SignatureHelpers.getUnvalidatedSignatureEnvelope request with
                 | Error e -> 
                     logger.LogError("Error getting signature envelope: {0}", sprintf "%A" e)
                     return AuthenticateResult.NoResult()
                 | Ok unvalidatedEnvelope -> 
-                    match SignatureHelpers.validateSignatureEnvelope options unvalidatedEnvelope with
+                    match SignatureHelpers.validateSignatureEnvelope currentOptions unvalidatedEnvelope with
                     | Error e ->
                         logger.LogError("Error validating signature: {0}", sprintf "%A" e)
                         return AuthenticateResult.NoResult()
                     | Ok envelope ->
                         let! validationResult = 
-                            SignatureHelpers.validateSignature options envelope
+                            SignatureHelpers.validateSignature repository currentOptions request envelope
                         match validationResult with
                         | Error err -> return AuthenticateResult.Fail (sprintf "%A" err)
                         | Ok clientId ->

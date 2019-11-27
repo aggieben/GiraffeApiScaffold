@@ -48,11 +48,11 @@ module TaskResult =
     }
 
 
-    // let inline (<*>) tr f = map f tr
+    let inline (<*>) tr f = map f tr
     // let inline (<*!>) tr f = mapErr f tr
 
     // // partial maps
-    // let inline (<*->) tr f = mapTaskResultBindResult f tr
+    let inline (<*->) tr f = mapTaskResultBindResult f tr
     // let inline (<*+>) tr f = mapTaskResultBindTask f tr
 
     // // partial binds
