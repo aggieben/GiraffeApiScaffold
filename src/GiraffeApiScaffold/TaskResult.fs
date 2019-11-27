@@ -48,20 +48,27 @@ module TaskResult =
     }
 
 
-    let inline (<*>) tr f = map f tr
-    let inline (<*!>) tr f = mapErr f tr
+    // let inline (<*>) tr f = map f tr
+    // let inline (<*!>) tr f = mapErr f tr
 
-    // partial maps
-    let inline (<*->) tr f = mapTaskResultBindResult f tr
-    let inline (<*+>) tr f = mapTaskResultBindTask f tr
+    // // partial maps
+    // let inline (<*->) tr f = mapTaskResultBindResult f tr
+    // let inline (<*+>) tr f = mapTaskResultBindTask f tr
 
-    // partial binds
-    let inline (<+>>-) t f = mapTaskBindTaskResult f t
-    let inline (<->>-) r f = mapResultBindTaskResult f r
+    // // partial binds
+    // let inline (<+>>-) t f = mapTaskBindTaskResult f t
+    // let inline (<->>-) r f = mapResultBindTaskResult f r
 
-    let inline (>>=) a f = bind f a
-    let inline (>=>) tr f = compose f tr
+    // let inline (>>=) a f = bind f a
+    // let inline (>=>) tr f = compose f tr
 
-// module Result =
-//     let inline (<*>) r f = Result.map f r
-//     let inline (<*!>) r f = Result.mapError f r
+module Result =
+    let bindOk (binder:'a->Result<'b,'e>) =
+        function | Ok ok -> binder ok | Error err -> Error err
+    let bindErr (binder:'e->Result<'a,'f>) =
+        function | Ok ok -> Ok ok | Error err -> binder err
+
+    let inline (<*>) r f = Result.map f r
+    let inline (<*!>) r f = Result.mapError f r
+    let inline (>>*=) r f = bindOk f r
+    let inline (>>!*=) r f = bindErr f r

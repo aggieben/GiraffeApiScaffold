@@ -5,7 +5,7 @@
     <TargetFramework>netcoreapp3.0</TargetFramework>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="Task.fs" />
+    <Compile Include="TaskResult.fs" />
     <Compile Include="Security.fs" />
     <Compile Include="Storage.fs" />
     <Compile Include="Signatures.fs" />
