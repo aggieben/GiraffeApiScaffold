@@ -19,7 +19,6 @@ let webApp =
         subRoute "/api"
             (choose [
                 GET >=> choose [
-                    route "/auth/nonce" >=> handleGetNonce
                     route "/hello" >=> 
                         requiresAuthentication unauthorizedHandler >=>
                             handleGetHello
@@ -46,6 +45,7 @@ let configureApp (app : IApplicationBuilder) =
     | true  -> app.UseDeveloperExceptionPage()
     | false -> app.UseGiraffeErrorHandler errorHandler)
         .UseHttpsRedirection()
+        .UseAuthentication()
         .UseGiraffe(webApp)
 
 let configureServices (services : IServiceCollection) =
@@ -62,7 +62,7 @@ let configureServices (services : IServiceCollection) =
     |> ignore
 
 let configureLogging (builder : ILoggingBuilder) =
-    builder.AddFilter(fun l -> l.Equals LogLevel.Trace)
+    builder.AddFilter(fun l -> true)
        .AddConsole()
        .AddDebug() |> ignore
 
@@ -71,9 +71,9 @@ let main _ =
     WebHostBuilder()
         .UseKestrel()
         .UseIISIntegration()
+        .ConfigureLogging(configureLogging)
         .Configure(Action<IApplicationBuilder> configureApp)
         .ConfigureServices(configureServices)
-        .ConfigureLogging(configureLogging)
         .Build()
         .Run()
     0
