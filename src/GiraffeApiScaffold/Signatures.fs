@@ -8,6 +8,7 @@ open System.Text.RegularExpressions
 open Microsoft.AspNetCore.Authentication
 open Microsoft.AspNetCore.Http
 open Microsoft.Extensions.Caching.Distributed
+open Microsoft.Extensions.Logging
 open Microsoft.Net.Http.Headers
 open FSharp.Control.Tasks.V2
 open FSharp.Data.UnitSystems.SI.UnitSymbols
@@ -32,6 +33,7 @@ type SignatureAuthenticationOptions() =
     member val MaxClockSkew = 600<s> with get,set
 
 type SignatureParsingError =
+    | MissingHeaderValue
     | InvalidParameters of string seq option
 
 type SignatureValidationError =
@@ -117,31 +119,21 @@ type SignatureEnvelope =
                 //           headers = headers }
                 //         |> Ok )
 
-module SignatureHelpers =
-    let getSignatureHeaderValue = 
-        (fun (h:IHeaderDictionary) -> h.GetCommaSeparatedValues(HeaderNames.Authorization))
-        >> Seq.tryFind (fun auth -> auth.StartsWith("Signature"))
-        >> Option.map (fun auth -> auth.Split(" ").[1])
-
-    let getUnvalidatedSignatureEnvelope (request:HttpRequest) =
-        getSignatureHeaderValue request.Headers
-        |> Option.map UnvalidatedSignatureEnvelope.TryParse
+module private SignatureHelpers =
 
     type private SignatureEnvelopeValidationState =
         { unvalidatedEnvelope : UnvalidatedSignatureEnvelope
           validatedEnvelope : SignatureEnvelope }
 
     type private SignatureValidationState =
-        { clientId : string option
+        { envelope: SignatureEnvelope option
           signature: ReadOnlyMemory<byte> option
-          nonce : byte[] option
           clientSecret : byte[] option 
           checkSignature : byte[] option }
         with 
             static member Default =
-                { clientId = None
+                { envelope = None
                   signature = None
-                  nonce = None
                   clientSecret = None
                   checkSignature = None }
 
@@ -160,6 +152,15 @@ module SignatureHelpers =
     //         ReadOnlyMemory(bytes).Slice(0, !byteCountRef) |> Ok
     //     else
     //         Error InvalidSignature
+    let getSignatureHeaderValue = 
+        (fun (h:IHeaderDictionary) -> h.GetCommaSeparatedValues(HeaderNames.Authorization))
+        >> Seq.tryFind (fun auth -> auth.StartsWith("Signature"))
+        >> Option.map (fun auth -> auth.IndexOf(' ') |> auth.Substring)
+
+    let getUnvalidatedSignatureEnvelope (request:HttpRequest) =
+        match getSignatureHeaderValue request.Headers with
+        | None -> Error MissingHeaderValue
+        | Some headerValue -> UnvalidatedSignatureEnvelope.TryParse headerValue
 
     let validateRequiredParams (unvalidatedEnvelope:UnvalidatedSignatureEnvelope) =
         let missingRequiredFields = 
@@ -246,11 +247,11 @@ module SignatureHelpers =
         >>*= validateAlgorithm options
         >>*= validateCreated options
         >>*= validateExpires options
-
-
+        >>*= validateHeaders options
 
     let ensureClientSecretAsync (repository:IRepository) state = task {
-        match! repository.GetClientSecret(state.clientId.Value) with
+        let envelope = state.envelope.Value
+        match! repository.GetClientSecret(envelope.keyId) with
         | None -> return InvalidClient |> Error
         | Some secret ->
             let key = Encoding.UTF8.GetBytes(secret)
@@ -270,10 +271,10 @@ module SignatureHelpers =
     //     | 0 -> Ok state
     //     | _ -> Error InvalidSignature
 
-    let validateSignature (options:SignatureAuthenticationOptions) (sigenv:SignatureEnvelope) =
-
-
-        // >=>     ensureClientSecretAsync repository
+    let validateSignature (repository:IRepository) (options:SignatureAuthenticationOptions) (sigenv:SignatureEnvelope) =
+        ensureClientSecretAsync repository { SignatureValidationState.Default 
+                                                with envelope = Some sigenv }
+        
         // <*>     computeCheckSignature
         // <*->    compareSignatures
         // <*>     (fun state -> state.clientId.Value) // drop state
@@ -315,18 +316,26 @@ type SignatureAuthenticationHandler(options, loggerFactory, encoder, clock, cach
             // expression below into a lambda, which takes them _out_ of the context of the class where the this
             // binding is accessible.  This binding is then captured as part of the closure for the CE
             let request = this.Request
+            let logger = loggerFactory.CreateLogger<SignatureAuthenticationHandler>()
             task {
-                match SignatureHelpers.getSignatureEnvelope request with
-                | None -> return AuthenticateResult.NoResult()
-                | Some envelope -> 
-                    let! validationResult = 
-                        SignatureHelpers.validateSignature repository cache envelope
-                    match validationResult with
-                    | Error err -> return AuthenticateResult.Fail (sprintf "%A" err)
-                    | Ok clientId ->
-                        let! principal = this.GetClaimsPrincipalForClient(clientId)
-                        let ticket = AuthenticationTicket(principal, this.Scheme.Name)
-                        return AuthenticateResult.Success(ticket)
+                match SignatureHelpers.getUnvalidatedSignatureEnvelope request with
+                | Error e -> 
+                    logger.LogError("Error getting signature envelope: {0}", sprintf "%A" e)
+                    return AuthenticateResult.NoResult()
+                | Ok unvalidatedEnvelope -> 
+                    match SignatureHelpers.validateSignatureEnvelope options unvalidatedEnvelope with
+                    | Error e ->
+                        logger.LogError("Error validating signature: {0}", sprintf "%A" e)
+                        return AuthenticateResult.NoResult()
+                    | Ok envelope ->
+                        let! validationResult = 
+                            SignatureHelpers.validateSignature options envelope
+                        match validationResult with
+                        | Error err -> return AuthenticateResult.Fail (sprintf "%A" err)
+                        | Ok clientId ->
+                            let! principal = this.GetClaimsPrincipalForClient(clientId)
+                            let ticket = AuthenticationTicket(principal, this.Scheme.Name)
+                            return AuthenticateResult.Success(ticket)
             }
 
     member this.GetClaimsPrincipalForClient(clientId:string) =
